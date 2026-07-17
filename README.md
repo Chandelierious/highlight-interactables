@@ -6,8 +6,9 @@ mod, its architecture, and its core functionality goes to the original author.
 The original is MIT-licensed; this fork retains that license and the original
 LICENSE file.
 
-The changes in this fork were made with AI assistance (Anthropic's Claude),
-directed and playtested by the fork maintainer.
+This is 99% maxbickett's work, and 1% AI. All I put in here was time. 
+It's not perfect, there are still some obvious bugs.
+It does what I wanted it to do, I'll work on it more if I get any ideas.
 
 > **Internal naming:** script paths (`scripts/TwentyTwentyObjects/`), the Lua
 > interface (`I.TwentyTwentyObjects`), and the settings storage key deliberately
