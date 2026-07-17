@@ -227,7 +227,17 @@ function M.getOutlineBox(object)
         end
     end
 
-    if corners then
+    -- The glow's CENTER comes from projecting bbox.center directly — the true
+    -- 3D centroid gives the visual center exactly. Deriving the center from
+    -- the min/max rect of projected corners skews toward whichever corners
+    -- protrude in screen space (video evidence: orbs sat up-left of crate
+    -- faces). Corners are only used for the on-screen SIZE.
+    local centerScreen = nil
+    if ok and bbox and bbox.center then
+        centerScreen = M.worldToScreen(bbox.center)
+    end
+
+    if corners and centerScreen then
         local minX, minY, maxX, maxY
         local projectedCount = 0
         for _, v in ipairs(corners) do
@@ -240,21 +250,33 @@ function M.getOutlineBox(object)
                 maxY = math.max(maxY or sp.y, sp.y)
             end
         end
-        -- Require most corners on-screen for a trustworthy rect; partially
-        -- visible objects fall through to the heuristic below.
+        -- World-space bbox diagonal: distance- and orientation-independent
+        -- measure of the object's physical size, for stable glow sizing.
+        local worldDiag = nil
+        if bbox.halfSize then
+            worldDiag = bbox.halfSize:length() * 2
+        end
         if projectedCount >= 4 then
             local w = math.max(12, math.min(maxX - minX, 800))
             local h = math.max(12, math.min(maxY - minY, 800))
-            -- World-space bbox diagonal: distance- and orientation-independent
-            -- measure of the object's physical size, for stable glow sizing.
-            local worldDiag = nil
-            if bbox.halfSize then
-                worldDiag = bbox.halfSize:length() * 2
+            if debugEnabled then
+                logger.debug(string.format('[OutlineBox] bbox path: corners=%d center=(%.0f,%.0f) size=%dx%d',
+                    projectedCount, centerScreen.x, centerScreen.y, w, h))
             end
-            return util.vector2((minX + maxX) / 2, (minY + maxY) / 2),
-                   util.vector2(w, h),
-                   worldDiag
+            return centerScreen, util.vector2(w, h), worldDiag
         end
+        -- Center is on screen but too few corners projected (object at a
+        -- screen edge): still center correctly, size from world diagonal.
+        if debugEnabled then
+            logger.debug(string.format('[OutlineBox] center-only path: corners=%d', projectedCount))
+        end
+        local approx = math.max(24, math.min((worldDiag or 100) * 0.6, 500))
+        return centerScreen, util.vector2(approx, approx), worldDiag
+    end
+
+    if debugEnabled then
+        logger.debug(string.format('[OutlineBox] heuristic fallback: bboxOk=%s hasBbox=%s hasCorners=%s hasCenterScreen=%s',
+            tostring(ok), tostring(bbox ~= nil), tostring(corners ~= nil), tostring(centerScreen ~= nil)))
     end
 
     -- Heuristic fallback (no usable bbox / too few corners projected):
