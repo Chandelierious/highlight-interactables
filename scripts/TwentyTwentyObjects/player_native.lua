@@ -814,6 +814,7 @@ end
 local function onFrame(dt)
     if not currentProfile then return end
     outlinePulseTime = outlinePulseTime + dt
+    projection.updateCamera() -- refresh the behind-camera cull ray this frame
     updateLabels(dt)
 end
 

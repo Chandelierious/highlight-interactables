@@ -48,12 +48,25 @@ end
 
 -- Convert world position to screen coordinates
 -- Returns vector2 or nil if position is behind camera
+-- Per-frame camera cache for the behind-camera check. Points behind the
+-- camera get MIRRORED through the screen center by the projection (phantom
+-- markers on the opposite side — seen in AJ's video), and worldToViewportVector's
+-- z alone does not reliably flag them. The forward ray comes from
+-- viewportToWorldVector(center) — engine-authoritative, no yaw/pitch trig
+-- (a previous hand-rolled version had an inverted pitch sign and culled
+-- objects the player looked down at).
+local camPos, camForward
+
+function M.updateCamera()
+    camPos = camera.getPosition()
+    camForward = camera.viewportToWorldVector(util.vector2(0.5, 0.5))
+end
+
 function M.worldToScreen(worldPos)
-    -- Behind-camera detection relies solely on worldToViewportVector's z
-    -- (distance from camera; <= 0/tiny means behind or at the camera).
-    -- A previous hand-rolled yaw/pitch "forward hemisphere" pre-check had an
-    -- inverted pitch convention and silently culled objects the player was
-    -- looking DOWN at (floor loot) — do not reintroduce it.
+    if not camPos then M.updateCamera() end
+    if (worldPos - camPos):dot(camForward) <= 0 then
+        return nil -- behind the camera; projecting would mirror it on screen
+    end
     local viewportPos = camera.worldToViewportVector(worldPos)
 
     -- The z component is the distance from camera to object
