@@ -25,6 +25,10 @@ local generalSettings = {}
 -- Cell:getAll is unavailable in player context. Refreshed per scan tick.
 local corpseCache = {}
 
+-- Last logged glow-color summary; logs at INFO whenever the resolved values
+-- change so color issues are diagnosable from openmw.log without debug mode.
+local lastGlowSummary = nil
+
 -- Initialize (defer storage-dependent parts to onLoad)
 -- labelRenderer.init() -- If this uses storage, move to onLoad
 
@@ -218,6 +222,21 @@ local function scanAndCreateLabels(profile)
     -- Only nil-guard here; the per-key string check below handles the rest.
     local categoryColors = appearanceNow.categoryColors
     if categoryColors == nil then categoryColors = {} end
+
+    -- One INFO line whenever the resolved color config changes: shows the
+    -- raw global preset and every per-type value as the scan actually sees
+    -- them (type problems show up as table:/userdata: values here).
+    do
+        local summary = 'global=' .. tostring(appearanceNow.glowColor)
+        for _, k in ipairs({ 'items', 'containers', 'doors', 'activators', 'npcs', 'creatures', 'deadBodies' }) do
+            local okI, v = pcall(function() return categoryColors[k] end)
+            summary = summary .. ' ' .. k .. '=' .. tostring(okI and v or 'READ-ERROR')
+        end
+        if summary ~= lastGlowSummary then
+            lastGlowSummary = summary
+            logger_module.info('[Glow] colors: ' .. summary)
+        end
+    end
     local function glowStyleFor(object)
         local t = object.type
         local cat
