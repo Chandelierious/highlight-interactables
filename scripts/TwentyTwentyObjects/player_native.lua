@@ -213,9 +213,11 @@ local function scanAndCreateLabels(profile)
     }
     -- Per-type glow colors: a category's preset overrides the global color;
     -- 'default'/absent/unknown presets fall back to glowStyle unchanged.
-    -- Type-guarded: persisted categoryColors may be missing or malformed.
+    -- NOTE: openmw.storage returns nested tables as read-only table-LIKE
+    -- userdata — a type(x)=='table' check would discard real saved settings.
+    -- Only nil-guard here; the per-key string check below handles the rest.
     local categoryColors = appearanceNow.categoryColors
-    if type(categoryColors) ~= 'table' then categoryColors = {} end
+    if categoryColors == nil then categoryColors = {} end
     local function glowStyleFor(object)
         local t = object.type
         local cat
@@ -234,7 +236,8 @@ local function scanAndCreateLabels(profile)
         else
             cat = 'items'
         end
-        local preset = categoryColors[cat]
+        local okIdx, preset = pcall(function() return categoryColors[cat] end)
+        if not okIdx then preset = nil end
         local color = (type(preset) == 'string') and labelRenderer.GLOW_COLORS[preset] or nil
         if not color then return glowStyle end
         return { color = color, sizeFactor = glowStyle.sizeFactor, opacity = glowStyle.opacity }

@@ -1057,14 +1057,25 @@ end
 createAppearanceSettings = function()
 
     -- Per-type glow color cycler. 'default' = follow the global Glow color.
+    -- categoryColors may arrive as a read-only table-like userdata (storage
+    -- proxies survive some round trips): READ via guarded index, WRITE by
+    -- rebuilding a plain table of the known keys — never mutate in place.
     local CATEGORY_COLOR_ORDER = {"default", "cyan", "white", "gold", "green", "red", "purple"}
-    local function categoryColorRow(label, key)
+    local CATEGORY_KEYS = {"items", "containers", "doors", "activators", "npcs", "creatures", "deadBodies"}
+    local function ccGet(key)
         local cc = appearanceSettings.categoryColors
-        if type(cc) ~= 'table' then
-            cc = {}
-            appearanceSettings.categoryColors = cc
-        end
-        local current = cc[key] or "default"
+        local ok, v = pcall(function() return cc and cc[key] end)
+        if ok and type(v) == 'string' then return v end
+        return "default"
+    end
+    local function ccSet(key, value)
+        local plain = {}
+        for _, k in ipairs(CATEGORY_KEYS) do plain[k] = ccGet(k) end
+        plain[key] = value
+        appearanceSettings.categoryColors = plain
+    end
+    local function categoryColorRow(label, key)
+        local current = ccGet(key)
         return {
             type = ui.TYPE.Text,
             props = {
@@ -1079,7 +1090,7 @@ createAppearanceSettings = function()
                     for i, name in ipairs(CATEGORY_COLOR_ORDER) do
                         if name == current then idx = i break end
                     end
-                    cc[key] = CATEGORY_COLOR_ORDER[(idx % #CATEGORY_COLOR_ORDER) + 1]
+                    ccSet(key, CATEGORY_COLOR_ORDER[(idx % #CATEGORY_COLOR_ORDER) + 1])
                     saveAppearanceSettings()
                     I.TwentyTwentyObjects.refreshUI()
                 end),
