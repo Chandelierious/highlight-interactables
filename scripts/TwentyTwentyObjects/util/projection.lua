@@ -10,6 +10,21 @@ local M = {}
 -- Cache screen size to avoid repeated lookups
 local screenSize = ui.screenSize()
 
+-- Compensation factor for OpenMW's engine-level "GUI scaling factor" setting.
+-- worldToViewportVector() and ui.screenSize() both return raw window pixels,
+-- but widget rendering is scaled by the engine's own GUI scale, which Lua has
+-- no documented way to read directly. Set this to match the user's actual
+-- engine GUI scale (see settings_improved.lua -> Appearance -> UI Scale Correction).
+M.guiScale = 1.0
+
+function M.setGuiScale(scale)
+    if type(scale) == 'number' and scale > 0 then
+        M.guiScale = scale
+    else
+        M.guiScale = 1.0
+    end
+end
+
 -- Logger for debugging
 local logger = require('scripts.TwentyTwentyObjects.util.logger')
 
@@ -102,6 +117,12 @@ function M.worldToScreen(worldPos)
             tostring(camPos), tostring(worldPos), toObject:length()))
     end
     
+    -- Compensate for the engine's GUI scaling factor before bounds checking,
+    -- so both the position and the isOnScreen check line up with rendered widgets.
+    if M.guiScale and M.guiScale ~= 1.0 then
+        screenPos = util.vector2(screenPos.x / M.guiScale, screenPos.y / M.guiScale)
+    end
+
     -- Be more lenient with bounds checking - objects slightly off-screen might still have visible labels
     local margin = 200  -- Increased margin
     if not M.isOnScreen(screenPos, margin) then
@@ -185,6 +206,91 @@ function M.getDistanceScale(distance, minDist, maxDist)
     -- Linear interpolation (could use other curves)
     local t = (distance - minDist) / (maxDist - minDist)
     return 1.0 - (t * 0.5)  -- Scale from 100% to 50%
+end
+
+-- Compute an on-screen outline box (center + size in pixels) for an object.
+-- Returns nil if the object can't be projected to a usable on-screen box.
+--
+-- object:getBoundingBox() returns an openmw.util#Box in WORLD coordinates.
+-- NOTE: util.box has `vertices` (8 corner vector3s), `center`, and `halfSize`
+-- — it does NOT have `min`/`max` fields. (This mod's original label-placement
+-- code checks bbox.max.z, which is always nil, so the bbox path there has
+-- silently never run; everything has been using the type-based fallbacks.)
+--
+-- Strategy: project all 8 corners to screen space and take the min/max
+-- extents — a true screen-space bounding rectangle that correctly handles
+-- rotated objects and meshes extending below their origin (hanging lanterns).
+function M.getOutlineBox(object)
+    local corners = nil
+    local ok, bbox = pcall(function() return object:getBoundingBox() end)
+    if ok and bbox then
+        if bbox.vertices then
+            corners = bbox.vertices
+        elseif bbox.center and bbox.halfSize then
+            local c, h = bbox.center, bbox.halfSize
+            corners = {}
+            for _, sx in ipairs({ -1, 1 }) do
+                for _, sy in ipairs({ -1, 1 }) do
+                    for _, sz in ipairs({ -1, 1 }) do
+                        table.insert(corners, util.vector3(
+                            c.x + sx * h.x, c.y + sy * h.y, c.z + sz * h.z))
+                    end
+                end
+            end
+        end
+    end
+
+    if corners then
+        local minX, minY, maxX, maxY
+        local projectedCount = 0
+        for _, v in ipairs(corners) do
+            local sp = M.worldToScreen(v)
+            if sp then
+                projectedCount = projectedCount + 1
+                minX = math.min(minX or sp.x, sp.x)
+                maxX = math.max(maxX or sp.x, sp.x)
+                minY = math.min(minY or sp.y, sp.y)
+                maxY = math.max(maxY or sp.y, sp.y)
+            end
+        end
+        -- Require most corners on-screen for a trustworthy rect; partially
+        -- visible objects fall through to the heuristic below.
+        if projectedCount >= 4 then
+            local w = math.max(12, math.min(maxX - minX, 800))
+            local h = math.max(12, math.min(maxY - minY, 800))
+            -- World-space bbox diagonal: distance- and orientation-independent
+            -- measure of the object's physical size, for stable glow sizing.
+            local worldDiag = nil
+            if bbox.halfSize then
+                worldDiag = bbox.halfSize:length() * 2
+            end
+            return util.vector2((minX + maxX) / 2, (minY + maxY) / 2),
+                   util.vector2(w, h),
+                   worldDiag
+        end
+    end
+
+    -- Heuristic fallback (no usable bbox / too few corners projected):
+    -- vertical extent from object origin to the label anchor point, fixed
+    -- aspect for width.
+    local basePos = object.position
+    local topPos = M.getObjectLabelPosition(object)  -- has its own fallback, never nil
+    local baseScreen = M.worldToScreen(basePos)
+    local topScreen = M.worldToScreen(topPos)
+    if not baseScreen or not topScreen then
+        return nil
+    end
+
+    local screenHeight = math.abs(topScreen.y - baseScreen.y)
+    if screenHeight <= 0 then
+        screenHeight = 40
+    end
+    screenHeight = math.max(20, math.min(screenHeight, 500))
+    local screenWidth = math.max(20, math.min(screenHeight * 0.6, 400))
+
+    local centerY = (topScreen.y + baseScreen.y) / 2
+    return util.vector2(baseScreen.x, centerY),
+           util.vector2(screenWidth, screenHeight)
 end
 
 return M

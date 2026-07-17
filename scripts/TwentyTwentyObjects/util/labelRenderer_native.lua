@@ -33,11 +33,27 @@ local NATIVE_STYLE = {
     baseTextSize = 16  -- Will be scaled by UI settings
 }
 
--- Get user's UI scaling factor
+-- Get user's UI scaling factor (matches the "UI Scale Correction" setting,
+-- which the user sets to their OpenMW GUI scaling factor)
 function M.getUIScale()
-    -- This would ideally read from OpenMW settings
-    -- For now, return 1.0
-    return 1.0
+    local storage_module = require('scripts.TwentyTwentyObjects.util.storage')
+    local appearance = storage_module.get('appearance', { guiScale = 100 })
+    return (appearance.guiScale or 100) / 100
+end
+
+-- Text label style from the Appearance settings.
+-- NOTE: the original mod's "Label opacity" slider stored appearance.opacity
+-- but nothing ever read it — it was a dead control. It is consumed here now.
+function M.getTextStyle()
+    local storage_module = require('scripts.TwentyTwentyObjects.util.storage')
+    local appearance = storage_module.get('appearance', {})
+    -- tonumber-guarded: the ORIGINAL mod defined appearance.textSize as a
+    -- STRING preset ("medium"), which is why the numeric size setting lives
+    -- under labelTextSize. Never assume stored values are numbers.
+    return {
+        opacity = tonumber(appearance.opacity) or 0.8,
+        sizeFactor = (tonumber(appearance.labelTextSize) or 100) / 100,
+    }
 end
 
 -- Create a native Morrowind-style label
@@ -45,7 +61,8 @@ function M.createNativeLabel(text, options)
     options = options or {}
     
     local scale = M.getUIScale()
-    local textSize = NATIVE_STYLE.baseTextSize * scale
+    local textStyle = M.getTextStyle()
+    local textSize = NATIVE_STYLE.baseTextSize * scale * textStyle.sizeFactor
     
     -- Apply distance-based sizing if requested
     if options.distanceScale then
@@ -79,7 +96,7 @@ function M.createNativeLabel(text, options)
             
             -- Visibility - start visible for debugging
             visible = true,  -- Always visible for now
-            alpha = options.alpha or 1.0
+            alpha = (options.alpha or 1.0) * textStyle.opacity
         },
         content = ui.content({
             {
@@ -98,6 +115,121 @@ function M.createNativeLabel(text, options)
     local element = ui.create(labelLayout)
     logger.debug(string.format('Label created: %s', tostring(element)))
     return element
+end
+
+-- Outline/glow highlight: a single ui.TYPE.Image per object using a radial
+-- gradient texture (textures/tto_soft_glow.png, shipped with this mod),
+-- tinted via the documented `color` prop — a soft circular glow centered on
+-- the object rather than a hard box.
+--
+-- WHY IMAGES (and not Containers): on this engine build, Containers render at
+-- their content-measured size and IGNORE explicit `size` (OpenMW issue #7848)
+-- — an empty Container with size set renders at 0x0, invisible. In-game
+-- diagnostics confirmed this. The Image widget has `resource`, `color`, and
+-- `size` as *documented* props with no content-based auto-sizing, so explicit
+-- sizes actually apply.
+local GLOW_TEXTURE = ui.texture { path = 'textures/tto_soft_glow.png' }
+
+-- Named color presets exposed in the settings menu.
+M.GLOW_COLORS = {
+    cyan   = col(0.4, 0.85, 1.0),
+    white  = col(1.0, 1.0, 1.0),
+    gold   = col(1.0, 0.85, 0.4),
+    green  = col(0.5, 1.0, 0.55),
+    red    = col(1.0, 0.45, 0.4),
+    purple = col(0.8, 0.5, 1.0),
+}
+
+local OUTLINE_STYLE = {
+    glowColor = M.GLOW_COLORS.cyan,   -- default tint
+    glowScale = 1.7,                  -- glow diameter relative to the object's larger screen dimension, at size 100%
+    baseAlpha = 0.8,                  -- glow alpha at full label alpha and opacity 100%... see below
+    minDiameter = 48,                 -- so small/distant objects still get a visible glow
+    maxDiameter = 900,
+}
+
+-- Glow diameter in pixels. Prefers the object's WORLD bbox diagonal
+-- (distance- and orientation-independent, so the glow is a stable UI marker
+-- like the text labels: bigger objects get bigger circles, but approaching an
+-- object doesn't balloon it). Falls back to the projected screen box only
+-- when no world size is available.
+function M.computeGlowDiameter(worldDiag, projectedSize, sizeFactor)
+    local d
+    if worldDiag and worldDiag > 0 then
+        -- Gentle sublinear curve: rat (~70u) ≈ 70px, NPC (~200u) ≈ 130px,
+        -- crate (~90u) ≈ 80px at 100% size.
+        d = 24 + math.sqrt(worldDiag) * 7.5
+    elseif projectedSize then
+        d = math.sqrt(projectedSize.x * projectedSize.y) * OUTLINE_STYLE.glowScale
+    else
+        d = 60
+    end
+    d = d * (sizeFactor or 1.0)
+    return math.max(OUTLINE_STYLE.minDiameter, math.min(d, OUTLINE_STYLE.maxDiameter))
+end
+
+-- style = { color = util.color, sizeFactor = number (1.0 = default), opacity = number (0..1) }
+local function glowGeometry(center, size, sizeFactor, worldDiag)
+    local d = M.computeGlowDiameter(worldDiag, size, sizeFactor)
+    return {
+        pos = util.vector2(center.x - d / 2, center.y - d / 2),
+        size = util.vector2(d, d),
+    }
+end
+
+-- Create a glow highlight. `options.position` (screen-space vector2) is the
+-- glow CENTER, `options.size` (vector2) is the object's on-screen extents.
+-- Optional style overrides: options.color (util.color), options.sizeFactor
+-- (1.0 = default size), options.opacity (0..1, replaces the default 0.8).
+-- Returns { glow = Element }.
+function M.createOutlineBox(options)
+    options = options or {}
+    local size = options.size or util.vector2(60, 60)
+    local center = options.position or util.vector2(0, 0)
+    local geo = glowGeometry(center, size, options.sizeFactor, options.worldDiag)
+    local opacity = options.opacity or OUTLINE_STYLE.baseAlpha
+
+    local glow = ui.create({
+        layer = 'HUD',
+        type = ui.TYPE.Image,
+        props = {
+            resource = GLOW_TEXTURE,
+            color = options.color or OUTLINE_STYLE.glowColor,
+            position = geo.pos,
+            size = geo.size,
+            alpha = (options.alpha or 1.0) * opacity,
+            visible = true,
+        },
+    })
+
+    return { glow = glow }
+end
+
+-- Update an existing glow's center position, size, and alpha in place.
+-- Accepts the same style overrides as createOutlineBox (sizeFactor, opacity).
+function M.updateOutlineBox(outlineBox, options)
+    if not outlineBox or not outlineBox.glow then return end
+    options = options or {}
+    local el = outlineBox.glow
+
+    if options.position and options.size then
+        local geo = glowGeometry(options.position, options.size, options.sizeFactor, options.worldDiag)
+        el.layout.props.position = geo.pos
+        el.layout.props.size = geo.size
+    end
+    if options.alpha ~= nil then
+        el.layout.props.alpha = options.alpha * (options.opacity or OUTLINE_STYLE.baseAlpha)
+    end
+    if options.visible ~= nil then
+        el.layout.props.visible = options.visible
+    end
+    el:update()
+end
+
+-- Destroy a glow highlight.
+function M.destroyOutlineBox(outlineBox)
+    if not outlineBox or not outlineBox.glow then return end
+    outlineBox.glow:destroy()
 end
 
 -- Create label with connecting line to object

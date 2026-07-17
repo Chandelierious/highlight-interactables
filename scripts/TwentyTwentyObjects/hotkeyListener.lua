@@ -27,8 +27,12 @@ local function cleanProfile(profile)
             misc = profile.filters and profile.filters.misc or false,
             npcs = profile.filters and profile.filters.npcs or false,
             creatures = profile.filters and profile.filters.creatures or false,
+            deadBodies = profile.filters and profile.filters.deadBodies or false,
             containers = profile.filters and profile.filters.containers or false,
-            doors = profile.filters and profile.filters.doors or false
+            doors = profile.filters and profile.filters.doors or false,
+            -- NOTE: activators was missing here in the original mod, silently
+            -- stripping that filter from every hotkey-triggered highlight.
+            activators = profile.filters and profile.filters.activators or false
         }
     }
 end
@@ -84,6 +88,41 @@ local function onKeyRelease(keyEvent)
     end
 end
 
+-- ===== Mouse button hotkey support =====
+-- Profiles can bind "mouse2".."mouse5" (middle, right, extra buttons).
+-- Uses the documented onMouseButtonPress/onMouseButtonRelease engine handlers
+-- (available to player scripts).
+local mouseActive = {}      -- [buttonNumber] = cleanedProfile currently "held"
+
+local function modifiersMatch(profile)
+    return (profile.shift or false) == input_module.isShiftPressed()
+       and (profile.ctrl or false) == input_module.isCtrlPressed()
+       and (profile.alt or false) == input_module.isAltPressed()
+end
+
+local function onMouseButtonPress(button)
+    local currentProfiles = storage_module.getProfiles()
+    if not currentProfiles or #currentProfiles == 0 then return end
+    local keyName = "mouse" .. tostring(button)
+    for _, profile in ipairs(currentProfiles) do
+        if profile.key == keyName and modifiersMatch(profile) then
+            local cleanedProfile = cleanProfile(profile)
+            mouseActive[button] = cleanedProfile
+            core_module.sendGlobalEvent("TTO_GlobalKeyEvent",
+                { eventType = "press", profile = cleanedProfile })
+            return
+        end
+    end
+end
+
+local function onMouseButtonRelease(button)
+    if mouseActive[button] then
+        core_module.sendGlobalEvent("TTO_GlobalKeyEvent",
+            { eventType = "release", profile = mouseActive[button] })
+        mouseActive[button] = nil
+    end
+end
+
 local function onLoad()
     -- local engine_storage = require('openmw.storage') -- No longer needed here
     -- storage_module.init(engine_storage) -- No longer needed here
@@ -97,6 +136,8 @@ return {
     engineHandlers = {
         onKeyPress = onKeyPress,
         onKeyRelease = onKeyRelease,
+        onMouseButtonPress = onMouseButtonPress,
+        onMouseButtonRelease = onMouseButtonRelease,
         onLoad = onLoad
     }
 } 

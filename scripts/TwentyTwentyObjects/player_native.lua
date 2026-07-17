@@ -38,6 +38,7 @@ local currentProfile = nil
 local updateAccumulator = 0
 local scanAccumulator = 0
 local lineUpdateAccumulator = 0
+local outlinePulseTime = 0
 
 -- Label data structure
 local function createLabelData(object, name, screenPos, objectScreenPos, priority)
@@ -114,12 +115,33 @@ local function getObjectName(object)
     return name
 end
 
+-- Is this actor dead? Checks health <= 0, falling back to isDeathFinished.
+-- pcall-guarded: stats access can fail for some object states, in which case
+-- that method is inconclusive and we try the next.
+local function isDeadActor(object)
+    local ok, dead = pcall(function()
+        return types.Actor.stats.dynamic.health(object).current <= 0
+    end)
+    if ok and dead then return true end
+    local ok2, dead2 = pcall(function()
+        return types.Actor.isDeathFinished(object)
+    end)
+    return ok2 and dead2 or false
+end
+
 -- Check if object matches filters
 local function matchesFilters(object, filters)
     local objType = object.type
     
-    if objType == types.NPC and filters.npcs then return true end
-    if objType == types.Creature and filters.creatures then return true end
+    -- Actors split into living (npcs/creatures filters) and dead (deadBodies filter)
+    if objType == types.NPC or objType == types.Creature then
+        if isDeadActor(object) then
+            return filters.deadBodies == true
+        end
+        if objType == types.NPC and filters.npcs then return true end
+        if objType == types.Creature and filters.creatures then return true end
+        return false
+    end
     if objType == types.Container and filters.containers then return true end
     if objType == types.Door and filters.doors then return true end
     if objType == types.Activator and filters.activators then return true end
@@ -165,6 +187,25 @@ local function scanAndCreateLabels(profile)
     
     -- Update and log screen size
     projection.updateScreenSize()
+
+    -- Pick up any change to the UI Scale Correction and highlight-style settings without requiring a reload
+    local appearanceNow = storage_module.get('appearance', {
+        guiScale = 100,
+        showTextLabels = true,
+        useOutlineHighlight = false,
+        glowColor = "cyan",
+        glowSize = 100,
+        glowOpacity = 80,
+    })
+    projection.setGuiScale((appearanceNow.guiScale or 100) / 100)
+    local showGlow = appearanceNow.useOutlineHighlight or false
+    local showText = appearanceNow.showTextLabels ~= false  -- default true for older saved settings
+    local glowStyle = {
+        color = labelRenderer.GLOW_COLORS[appearanceNow.glowColor or "cyan"]
+                or labelRenderer.GLOW_COLORS.cyan,
+        sizeFactor = (appearanceNow.glowSize or 100) / 100,
+        opacity = (appearanceNow.glowOpacity or 80) / 100,
+    }
     
     -- Clear existing
     clearAllLabels()
@@ -176,10 +217,14 @@ local function scanAndCreateLabels(profile)
     -- Get occlusion method based on performance settings
     local performance = storage_module.get('performance', {occlusion = "medium"})
     
-    -- Gather all nearby objects
+    -- Gather all nearby objects (deduped across sources — corpses can come
+    -- from both nearby.actors and cell:getAll depending on engine build)
+    local seenObjects = {}
     local function gatherObjects(objectList, typeFilter)
         for _, obj in ipairs(objectList) do
-            if matchesFilters(obj, profile.filters) then
+            local objKey = tostring(obj)
+            if not seenObjects[objKey] and matchesFilters(obj, profile.filters) then
+                seenObjects[objKey] = true
                 local distSq = (obj.position - playerPos):length2()
                 if distSq <= radiusSq then
                     -- Check if object is in front of camera first
@@ -214,8 +259,27 @@ local function scanAndCreateLabels(profile)
     end
     
     -- Gather from all sources
-    if profile.filters.npcs or profile.filters.creatures then
+    if profile.filters.npcs or profile.filters.creatures or profile.filters.deadBodies then
         gatherObjects(nearby.actors)
+    end
+    if profile.filters.deadBodies then
+        -- nearby.actors omits dead actors on at least some engine builds, so
+        -- also pull all NPCs/creatures in the player's current cell via the
+        -- documented Cell:getAll (returns objects regardless of life state;
+        -- matchesFilters routes dead ones to the deadBodies filter and the
+        -- seenObjects dedupe drops anything already gathered above).
+        -- Limitation: getAll only covers the player's own cell, so in
+        -- exteriors corpses in adjacent grid cells within the radius may
+        -- still be missed.
+        local okCell, errCell = pcall(function()
+            if self.cell then
+                gatherObjects(self.cell:getAll(types.NPC))
+                gatherObjects(self.cell:getAll(types.Creature))
+            end
+        end)
+        if not okCell then
+            logger_module.warn('[Dead] cell:getAll gather FAILED: ' .. tostring(errCell))
+        end
     end
     if profile.filters.items or profile.filters.weapons or profile.filters.armor or 
        profile.filters.clothing or profile.filters.books or profile.filters.ingredients or 
@@ -253,6 +317,113 @@ local function scanAndCreateLabels(profile)
     
     logger_module.debug(string.format('Processing %d objects (max: %d)', #toProcess, maxLabels))
     
+    if showGlow then
+        if generalSettings.debug then
+            logger_module.debug(string.format('[Outline] glow pass: toProcess=%d', #toProcess))
+        end
+
+        -- Glow highlights are anchored directly to each object's projected
+        -- bounding box — no jittering or connecting lines. Runs independently
+        -- of (and in addition to) text labels below.
+        local created, skippedNoBox, skippedNameless = 0, 0, 0
+        for _, candidate in ipairs(toProcess) do
+            -- Skip objects with empty names: these are typically invisible
+            -- utility objects (most commonly meshless light emitters placed
+            -- for ambient lighting). Text mode "skips" them de facto because
+            -- an empty-string label renders as nothing; a glow has no such
+            -- accidental filter, so make it explicit.
+            local name = getObjectName(candidate.object)
+            if not name or name == "" then
+                skippedNameless = skippedNameless + 1
+            else
+                local center, size, worldDiag = projection.getOutlineBox(candidate.object)
+                if center and size then
+                    local ok, box = pcall(labelRenderer.createOutlineBox, {
+                        position = center,
+                        size = size,
+                        worldDiag = worldDiag,
+                        alpha = 1.0,
+                        color = glowStyle.color,
+                        sizeFactor = glowStyle.sizeFactor,
+                        opacity = glowStyle.opacity,
+                    })
+                    if ok and box then
+                        table.insert(activeLabels, {
+                            id = tostring(candidate.object) .. "_glow_" .. os.time(),
+                            object = candidate.object,
+                            name = name,
+                            label = box,
+                            isOutline = true,
+                            glowStyle = glowStyle,
+                            line = nil,
+                            alpha = 1.0,
+                            targetAlpha = 1,
+                            visible = true,
+                        })
+                        created = created + 1
+                    else
+                        logger_module.warn(string.format('[Outline] createOutlineBox failed for %s: %s',
+                            name, tostring(box)))
+                    end
+                else
+                    skippedNoBox = skippedNoBox + 1
+                end
+            end
+        end
+
+        if generalSettings.debug then
+            logger_module.debug(string.format(
+                '[Outline] glow pass done: created=%d skippedNoBox=%d skippedNameless=%d',
+                created, skippedNoBox, skippedNameless))
+        end
+    end
+
+    if not showText then
+        return
+    end
+    
+    -- When glow highlights are also enabled, anchor text labels directly to
+    -- each object's glow (top edge of its projected bounding box) instead of
+    -- running the jitter solver — the user asked for text that tracks the
+    -- glow rather than floating/jittering beside it. Text-only mode keeps
+    -- the original jitter behavior (it's what declutters dense scenes).
+    if showGlow then
+        for _, candidate in ipairs(toProcess) do
+            local name = getObjectName(candidate.object)
+            if name and name ~= "" then
+                local center, size, worldDiag = projection.getOutlineBox(candidate.object)
+                if center and size then
+                    local glowD = labelRenderer.computeGlowDiameter(worldDiag, size, glowStyle.sizeFactor)
+                    local labelPos = util.vector2(center.x, center.y - glowD / 2 - 14)
+                    local label = labelRenderer.createNativeLabel(name, {
+                        position = labelPos,
+                        distanceScale = projection.getDistanceScale(candidate.distance),
+                        alpha = 1.0
+                    })
+                    if label then
+                        table.insert(activeLabels, {
+                            id = tostring(candidate.object) .. "_text_" .. os.time(),
+                            object = candidate.object,
+                            name = name,
+                            label = label,
+                            isAnchored = true,
+                            -- Same style the glow uses: the per-frame update
+                            -- recomputes the anchor from the glow radius, so
+                            -- it MUST use the same sizeFactor as the scan-time
+                            -- placement or the label snaps between two heights.
+                            glowStyle = glowStyle,
+                            line = nil,
+                            alpha = 1.0,
+                            targetAlpha = 1,
+                            visible = true
+                        })
+                    end
+                end
+            end
+        end
+        return
+    end
+
     -- Calculate screen positions and prepare for jittering
     labelLayout.solver:clear()
     local labelDataList = {}
@@ -389,6 +560,7 @@ end
 
 -- Update label positions and lines
 local function updateLabels(dt)
+    local textStyle = labelRenderer.getTextStyle()
     labelLayout.solver:clear()
     local toRemove = {}
     local needsJitter = false
@@ -399,6 +571,73 @@ local function updateLabels(dt)
             labelData.targetAlpha = 0
             if labelData.alpha <= 0 then
                 table.insert(toRemove, i)
+            end
+        elseif labelData.isAnchored then
+            -- Text label anchored to its object's glow: track position each
+            -- frame, no jitter solver.
+            local center, size, worldDiag = projection.getOutlineBox(labelData.object)
+            if center and size then
+                labelData.visible = true
+                labelData.targetAlpha = 1
+            else
+                labelData.visible = false
+                labelData.targetAlpha = 0
+            end
+
+            if labelData.alpha < labelData.targetAlpha then
+                labelData.alpha = math.min(labelData.targetAlpha,
+                                          labelData.alpha + dt / CONFIG.FADE_DURATION)
+            elseif labelData.alpha > labelData.targetAlpha then
+                labelData.alpha = math.max(labelData.targetAlpha,
+                                          labelData.alpha - dt / CONFIG.FADE_DURATION)
+            end
+
+            if labelData.label and labelData.label.layout and labelData.label.layout.props then
+                if center and size then
+                    local style = labelData.glowStyle or {}
+                    local glowD = labelRenderer.computeGlowDiameter(worldDiag, size, style.sizeFactor)
+                    labelData.label.layout.props.position =
+                        util.vector2(center.x, center.y - glowD / 2 - 14)
+                end
+                labelData.label.layout.props.alpha = labelData.alpha * textStyle.opacity
+                labelData.label.layout.props.visible = labelData.visible and labelData.alpha > 0
+                labelData.label:update()
+            end
+        elseif labelData.isOutline then
+            -- Glow highlight: recompute geometry directly from the object's
+            -- bounding box every frame (position AND size change as the player
+            -- moves) — no jitter solver involved, the glow just tracks the object.
+            local center, size, worldDiag = projection.getOutlineBox(labelData.object)
+            if center and size then
+                labelData.visible = true
+                labelData.targetAlpha = 1
+            else
+                labelData.visible = false
+                labelData.targetAlpha = 0
+            end
+
+            if labelData.alpha < labelData.targetAlpha then
+                labelData.alpha = math.min(labelData.targetAlpha,
+                                          labelData.alpha + dt / CONFIG.FADE_DURATION)
+            elseif labelData.alpha > labelData.targetAlpha then
+                labelData.alpha = math.max(labelData.targetAlpha,
+                                          labelData.alpha - dt / CONFIG.FADE_DURATION)
+            end
+
+            if labelData.label and center and size then
+                -- Gentle pulse: oscillate alpha ±20% around 80% of full,
+                -- ~1.6s period. Subtle by design.
+                local pulse = 0.8 + 0.2 * math.sin(outlinePulseTime * 4.0)
+                local style = labelData.glowStyle or {}
+                labelRenderer.updateOutlineBox(labelData.label, {
+                    position = center,
+                    size = size,
+                    worldDiag = worldDiag,
+                    alpha = labelData.alpha * pulse,
+                    sizeFactor = style.sizeFactor,
+                    opacity = style.opacity,
+                    visible = labelData.visible and labelData.alpha > 0,
+                })
             end
         else
             -- Update object screen position
@@ -426,25 +665,25 @@ local function updateLabels(dt)
                 labelData.visible = false
                 labelData.targetAlpha = 0
             end
-        end
-        
-        -- Update alpha
-        if labelData.alpha < labelData.targetAlpha then
-            labelData.alpha = math.min(labelData.targetAlpha,
-                                      labelData.alpha + dt / CONFIG.FADE_DURATION)
-        elseif labelData.alpha > labelData.targetAlpha then
-            labelData.alpha = math.max(labelData.targetAlpha,
-                                      labelData.alpha - dt / CONFIG.FADE_DURATION)
-        end
-        
-        -- Update label UI
-        if labelData.label then
-            if labelData.label.layout and labelData.label.layout.props then
-                labelData.label.layout.props.alpha = labelData.alpha
-                labelData.label.layout.props.visible = labelData.visible and labelData.alpha > 0
-                labelData.label:update()
-            else
-                logger_module.error('Label has no layout or props!')
+            
+            -- Update alpha
+            if labelData.alpha < labelData.targetAlpha then
+                labelData.alpha = math.min(labelData.targetAlpha,
+                                          labelData.alpha + dt / CONFIG.FADE_DURATION)
+            elseif labelData.alpha > labelData.targetAlpha then
+                labelData.alpha = math.max(labelData.targetAlpha,
+                                          labelData.alpha - dt / CONFIG.FADE_DURATION)
+            end
+            
+            -- Update label UI
+            if labelData.label then
+                if labelData.label.layout and labelData.label.layout.props then
+                    labelData.label.layout.props.alpha = labelData.alpha * textStyle.opacity
+                    labelData.label.layout.props.visible = labelData.visible and labelData.alpha > 0
+                    labelData.label:update()
+                else
+                    logger_module.error('Label has no layout or props!')
+                end
             end
         end
     end
@@ -501,7 +740,9 @@ local function updateLabels(dt)
     -- Remove dead labels
     for i = #toRemove, 1, -1 do
         local labelData = activeLabels[toRemove[i]]
-        if labelData.label then
+        if labelData.isOutline then
+            labelRenderer.destroyOutlineBox(labelData.label)
+        elseif labelData.label then
             labelData.label:destroy()
         end
         if labelData.line then
@@ -521,7 +762,9 @@ end
 -- Clear all labels
 function clearAllLabels()
     for _, labelData in ipairs(activeLabels) do
-        if labelData.label then
+        if labelData.isOutline then
+            labelRenderer.destroyOutlineBox(labelData.label)
+        elseif labelData.label then
             labelData.label:destroy()
         end
         if labelData.line then
@@ -577,6 +820,9 @@ local function onUpdate(dt)
         return
     end
     
+    -- Advance the glow pulse clock
+    outlinePulseTime = outlinePulseTime + dt
+
     -- Update existing labels
     updateAccumulator = updateAccumulator + dt
     if updateAccumulator >= CONFIG.UPDATE_INTERVAL then
@@ -584,12 +830,16 @@ local function onUpdate(dt)
         updateAccumulator = 0
     end
     
-    -- Rescan for new objects
+    -- Rescan for new objects: full rescan on an interval so objects that
+    -- come into view while the highlight is held/toggled get picked up.
+    -- (The original code only reset the occlusion cache here and never
+    -- rescanned, which is why hold mode only ever showed what was visible
+    -- at the moment of the keypress.)
     scanAccumulator = scanAccumulator + dt
     if scanAccumulator >= CONFIG.SCAN_INTERVAL then
         if currentProfile then
             occlusion.newFrame()
-            -- Could implement incremental scanning here
+            scanAndCreateLabels(currentProfile)
         end
         scanAccumulator = 0
     end
@@ -604,6 +854,10 @@ local function onLoad()
     
     labelRenderer.init()
     projection.updateScreenSize()
+
+    local appearance = storage_module.get('appearance', { guiScale = 100 })
+    projection.setGuiScale((appearance.guiScale or 100) / 100)
+
     logger_module.info('Native player script loaded with debug enabled')
 end
 

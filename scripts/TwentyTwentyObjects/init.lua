@@ -32,8 +32,13 @@ local function cleanFilters(filters)
         misc = filters.misc or false,
         npcs = filters.npcs or false,
         creatures = filters.creatures or false,
+        deadBodies = filters.deadBodies or false,
         containers = filters.containers or false,
-        doors = filters.doors or false
+        doors = filters.doors or false,
+        -- NOTE: activators was missing from this whitelist too (same bug as
+        -- the one in hotkeyListener.cleanProfile) — the mod sanitizes
+        -- profiles in TWO places and both must list every filter key.
+        activators = filters.activators or false
     }
 end
 
@@ -98,7 +103,14 @@ local defaultAppearance = {
     animationSpeed = "normal",
     fadeDistance = true,
     groupSimilar = false,
-    opacity = 0.8
+    opacity = 0.8,
+    guiScale = 100,
+    showTextLabels = true,
+    useOutlineHighlight = false,
+    glowColor = "cyan",
+    glowSize = 100,
+    glowOpacity = 80,
+    labelTextSize = 100
 }
 
 local defaultPerformance = {
