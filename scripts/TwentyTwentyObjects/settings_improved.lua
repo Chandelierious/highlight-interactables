@@ -1812,11 +1812,10 @@ end
 
 -- Handle key press events for key binding
 local function onKeyPress(key)
-    -- Debug logging
-    logger_module.debug("onKeyPress called, awaitingKeypress = " .. tostring(awaitingKeypress))
-    
+    -- No logging before this guard: this handler fires for EVERY keypress
+    -- in the game and an unconditional debug line floods openmw.log.
     if not awaitingKeypress then return end
-    
+
     logger_module.debug("Key pressed: code = " .. tostring(key.code))
     
     -- Cancel on escape

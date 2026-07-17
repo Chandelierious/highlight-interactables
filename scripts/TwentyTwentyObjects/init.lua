@@ -294,6 +294,27 @@ end
 -- No map function needed if not used by active code
 -- local function map(tbl, fn) return {} end
 
+-- Cell:getAll is global-context-only; the player script's dead-bodies
+-- filter requests the current cell's actors from here and scans the reply.
+local function onRequestCellActors(data)
+    local player = data and data.player
+    if not player or not player.cell then return end
+    local objects = {}
+    local ok, err = pcall(function()
+        for _, obj in ipairs(player.cell:getAll(types.NPC)) do
+            table.insert(objects, obj)
+        end
+        for _, obj in ipairs(player.cell:getAll(types.Creature)) do
+            table.insert(objects, obj)
+        end
+    end)
+    if not ok then
+        logger_module.warn('[Global] cell:getAll failed: ' .. tostring(err))
+        return
+    end
+    player:sendEvent('TTO_CellActors', { objects = objects })
+end
+
 return {
     -- engineHandlers = {} -- NO onLoad/onSave for GLOBAL scripts
     eventHandlers = {
@@ -301,6 +322,7 @@ return {
         TTO_UpdateProfiles = onUpdateProfiles,
         TTO_UpdateAppearance = onUpdateAppearance,
         TTO_UpdatePerformance = onUpdatePerformance,
-        TTO_UpdateGeneral = onUpdateGeneral
+        TTO_UpdateGeneral = onUpdateGeneral,
+        TTO_RequestCellActors = onRequestCellActors
     }
 }

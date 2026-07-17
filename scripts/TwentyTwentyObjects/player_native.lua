@@ -1,6 +1,7 @@
 -- player_native.lua: Player script using native Morrowind styling and intelligent jittering
 -- Combines native tooltip appearance with smart label placement
 
+local core = require('openmw.core')
 local nearby = require('openmw.nearby')
 local ui = require('openmw.ui')
 local util = require('openmw.util')
@@ -20,12 +21,17 @@ local labelLayout = require('scripts.TwentyTwentyObjects.util.labelLayout_jitter
 -- Forward declare
 local generalSettings = {}
 
+-- Cell actors (incl. corpses) supplied by the global script, since
+-- Cell:getAll is unavailable in player context. Refreshed per scan tick.
+local corpseCache = {}
+
 -- Initialize (defer storage-dependent parts to onLoad)
 -- labelRenderer.init() -- If this uses storage, move to onLoad
 
 -- Configuration
 local CONFIG = {
-    UPDATE_INTERVAL = 0.033,      -- 30fps label updates
+    -- Label positions reproject every rendered frame via onFrame (markers
+    -- lag visibly at any fixed sub-frame cadence); only the rescan is timed.
     SCAN_INTERVAL = 0.25,         -- Object rescan rate
     MAX_LABELS = 100,             -- Maximum visible labels
     FADE_DURATION = 0.15,         -- Fade in/out time
@@ -35,7 +41,6 @@ local CONFIG = {
 -- State
 local activeLabels = {}
 local currentProfile = nil
-local updateAccumulator = 0
 local scanAccumulator = 0
 local lineUpdateAccumulator = 0
 local outlinePulseTime = 0
@@ -263,23 +268,14 @@ local function scanAndCreateLabels(profile)
         gatherObjects(nearby.actors)
     end
     if profile.filters.deadBodies then
-        -- nearby.actors omits dead actors on at least some engine builds, so
-        -- also pull all NPCs/creatures in the player's current cell via the
-        -- documented Cell:getAll (returns objects regardless of life state;
-        -- matchesFilters routes dead ones to the deadBodies filter and the
-        -- seenObjects dedupe drops anything already gathered above).
-        -- Limitation: getAll only covers the player's own cell, so in
-        -- exteriors corpses in adjacent grid cells within the radius may
-        -- still be missed.
-        local okCell, errCell = pcall(function()
-            if self.cell then
-                gatherObjects(self.cell:getAll(types.NPC))
-                gatherObjects(self.cell:getAll(types.Creature))
-            end
-        end)
-        if not okCell then
-            logger_module.warn('[Dead] cell:getAll gather FAILED: ' .. tostring(errCell))
-        end
+        -- nearby.actors omits dead actors on at least some engine builds.
+        -- Cell:getAll is GLOBAL-scripts-only (calling it here always failed
+        -- with "attempt to call method 'getAll'"), so the global script
+        -- gathers cell actors for us: we scan from the cached reply of the
+        -- previous request, then request a refresh for the next scan tick
+        -- (<= one SCAN_INTERVAL of staleness; corpses don't move).
+        gatherObjects(corpseCache)
+        core.sendGlobalEvent('TTO_RequestCellActors', { player = self.object })
     end
     if profile.filters.items or profile.filters.weapons or profile.filters.armor or 
        profile.filters.clothing or profile.filters.books or profile.filters.ingredients or 
@@ -806,8 +802,19 @@ local function onToggleDebug(eventData)
         generalSettings.debug = eventData.enabled
         storage_module.set('general', generalSettings)
         logger_module.init(generalSettings.debug)
+        projection.setDebug(generalSettings.debug)
         logger_module.info(string.format('Debug mode %s', generalSettings.debug and 'enabled' or 'disabled'))
     end
+end
+
+-- Per-rendered-frame reprojection: onFrame runs right after input
+-- processing, so marker positions use the camera pose of the frame actually
+-- being rendered (onUpdate's simulation-phase camera state can be a frame
+-- behind, and any accumulator gate freezes markers between ticks).
+local function onFrame(dt)
+    if not currentProfile then return end
+    outlinePulseTime = outlinePulseTime + dt
+    updateLabels(dt)
 end
 
 -- Update loop
@@ -820,16 +827,7 @@ local function onUpdate(dt)
         return
     end
     
-    -- Advance the glow pulse clock
-    outlinePulseTime = outlinePulseTime + dt
-
-    -- Update existing labels
-    updateAccumulator = updateAccumulator + dt
-    if updateAccumulator >= CONFIG.UPDATE_INTERVAL then
-        updateLabels(updateAccumulator)
-        updateAccumulator = 0
-    end
-    
+    -- Positions are reprojected in onFrame; onUpdate only drives the rescan.
     -- Rescan for new objects: full rescan on an interval so objects that
     -- come into view while the highlight is held/toggled get picked up.
     -- (The original code only reset the occlusion cache here and never
@@ -851,7 +849,8 @@ local function onLoad()
 
     generalSettings = storage_module.get('general', { debug = false })
     logger_module.init(generalSettings.debug)  -- Use settings for debug mode
-    
+    projection.setDebug(generalSettings.debug)
+
     labelRenderer.init()
     projection.updateScreenSize()
 
@@ -866,11 +865,15 @@ logger_module.info('Twenty Twenty Objects native player script (player_native.lu
 return {
     engineHandlers = {
         onUpdate = onUpdate,
+        onFrame = onFrame,
         onLoad = onLoad
     },
     eventHandlers = {
         TTO_ShowHighlights = onShowHighlights,
         TTO_HideHighlights = onHideHighlights,
-        TTO_ToggleDebug = onToggleDebug
+        TTO_ToggleDebug = onToggleDebug,
+        TTO_CellActors = function(data)
+            corpseCache = (data and data.objects) or {}
+        end
     }
 }

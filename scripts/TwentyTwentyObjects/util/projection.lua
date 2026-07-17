@@ -25,6 +25,15 @@ function M.setGuiScale(scale)
     end
 end
 
+-- Debug flag, pushed in from the player script (onLoad / debug toggle).
+-- worldToScreen runs per marker per rendered frame; it must not touch
+-- engine storage on every call.
+local debugEnabled = false
+
+function M.setDebug(enabled)
+    debugEnabled = enabled and true or false
+end
+
 -- Logger for debugging
 local logger = require('scripts.TwentyTwentyObjects.util.logger')
 
@@ -32,10 +41,7 @@ local logger = require('scripts.TwentyTwentyObjects.util.logger')
 function M.updateScreenSize()
     -- Force update from UI
     screenSize = ui.screenSize()
-    -- Check if debug mode is enabled
-    local storage = require('scripts.TwentyTwentyObjects.util.storage')
-    local generalSettings = storage.get('general', { debug = false })
-    if generalSettings.debug then
+    if debugEnabled then
         logger.debug(string.format('Screen size updated: %dx%d', screenSize.x, screenSize.y))
     end
 end
@@ -43,36 +49,13 @@ end
 -- Convert world position to screen coordinates
 -- Returns vector2 or nil if position is behind camera
 function M.worldToScreen(worldPos)
-    -- First do a simple check if object is behind camera
-    -- This prevents objects behind us from being projected to screen coordinates in front
-    local camPos = camera.getPosition()
-    local toObject = worldPos - camPos
-    
-    -- Get camera forward direction from yaw and pitch
-    local yaw = camera.getYaw() + camera.getExtraYaw()
-    local pitch = camera.getPitch() + camera.getExtraPitch()
-    
-    -- Calculate forward vector
-    local camForward = util.vector3(
-        math.sin(yaw) * math.cos(pitch),
-        math.cos(yaw) * math.cos(pitch),
-        math.sin(pitch)
-    )
-    
-    -- Check if object is in front hemisphere (dot product > 0)
-    local dot = toObject:dot(camForward)
-    if dot <= 0 then
-        -- Object is behind camera
-        return nil
-    end
-    
-    -- Use OpenMW's camera projection function
+    -- Behind-camera detection relies solely on worldToViewportVector's z
+    -- (distance from camera; <= 0/tiny means behind or at the camera).
+    -- A previous hand-rolled yaw/pitch "forward hemisphere" pre-check had an
+    -- inverted pitch convention and silently culled objects the player was
+    -- looking DOWN at (floor loot) — do not reintroduce it.
     local viewportPos = camera.worldToViewportVector(worldPos)
-    
-    -- Check if debug mode is enabled
-    local storage = require('scripts.TwentyTwentyObjects.util.storage')
-    local generalSettings = storage.get('general', { debug = false })
-    
+
     -- The z component is the distance from camera to object
     -- If it's negative or very small, the object is behind or at the camera
     if viewportPos.z <= 1 then
@@ -92,7 +75,7 @@ function M.worldToScreen(worldPos)
     -- WORKAROUND: At ultrawide resolutions, OpenMW sometimes returns incorrect viewport coordinates
     -- If the coordinates are way outside reasonable bounds, try to correct them
     if math.abs(screenX) > screenSize.x * 3 then
-        if generalSettings.debug then
+        if debugEnabled then
             logger.debug(string.format('Correcting extreme X coordinate: %.1f -> clamped', screenX))
         end
         -- This object is likely at the edge of the screen, clamp it
@@ -100,7 +83,7 @@ function M.worldToScreen(worldPos)
     end
     
     if math.abs(screenY) > screenSize.y * 3 then
-        if generalSettings.debug then
+        if debugEnabled then
             logger.debug(string.format('Correcting extreme Y coordinate: %.1f -> clamped', screenY))
         end
         screenY = screenY > 0 and (screenSize.y + 100) or -100
@@ -110,11 +93,11 @@ function M.worldToScreen(worldPos)
     local screenPos = util.vector2(screenX, screenY)
     
     -- Log suspicious coordinates
-    if generalSettings.debug and (math.abs(screenX) > screenSize.x * 2 or math.abs(screenY) > screenSize.y * 2) then
+    if debugEnabled and (math.abs(screenX) > screenSize.x * 2 or math.abs(screenY) > screenSize.y * 2) then
         logger.debug(string.format('Suspicious viewport coordinates: viewport=(%.1f, %.1f, %.1f), screen size=%dx%d', 
             viewportPos.x, viewportPos.y, viewportPos.z, screenSize.x, screenSize.y))
-        logger.debug(string.format('Camera pos: %s, Object pos: %s, Distance: %.1f', 
-            tostring(camPos), tostring(worldPos), toObject:length()))
+        logger.debug(string.format('Object pos: %s, camera distance: %.1f',
+            tostring(worldPos), viewportPos.z))
     end
     
     -- Compensate for the engine's GUI scaling factor before bounds checking,
@@ -177,13 +160,17 @@ function M.getObjectLabelPosition(object)
     end
 end
 
--- Check if screen position is within visible bounds
+-- Check if screen position is within visible bounds.
+-- Positions handed in are in guiScale-compensated space (worldToScreen
+-- divides by guiScale), so the bounds must be scaled the same way.
 function M.isOnScreen(screenPos, margin)
     margin = margin or 0
-    return screenPos.x >= -margin and 
-           screenPos.x <= screenSize.x + margin and
-           screenPos.y >= -margin and 
-           screenPos.y <= screenSize.y + margin
+    local w = screenSize.x / M.guiScale
+    local h = screenSize.y / M.guiScale
+    return screenPos.x >= -margin and
+           screenPos.x <= w + margin and
+           screenPos.y >= -margin and
+           screenPos.y <= h + margin
 end
 
 -- Clamp screen position to stay within bounds
