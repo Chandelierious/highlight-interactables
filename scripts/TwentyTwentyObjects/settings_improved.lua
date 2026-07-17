@@ -150,7 +150,9 @@ local appearanceSettings = {
     glowColor = "cyan",
     glowSize = 100,    -- percent
     glowOpacity = 80,      -- percent
-    labelTextSize = 100    -- percent (numeric; 'textSize' is a legacy string key)
+    labelTextSize = 100,   -- percent (numeric; 'textSize' is a legacy string key)
+    -- per-type glow color presets; empty = every type uses glowColor
+    categoryColors = {}
 }
 local performanceSettings = {
     maxLabels = 100,
@@ -1054,6 +1056,45 @@ end
 -- Create appearance settings
 createAppearanceSettings = function()
 
+    -- Per-type glow color cycler. 'default' = follow the global Glow color.
+    local CATEGORY_COLOR_ORDER = {"default", "cyan", "white", "gold", "green", "red", "purple"}
+    local function categoryColorRow(label, key)
+        local cc = appearanceSettings.categoryColors
+        if type(cc) ~= 'table' then
+            cc = {}
+            appearanceSettings.categoryColors = cc
+        end
+        local current = cc[key] or "default"
+        return {
+            type = ui.TYPE.Text,
+            props = {
+                text = label .. ": [" .. current .. "] (click to change)",
+                textSize = 14,
+                textColor = CLICKABLE_TEXT_COLOR,
+                margin = {bottom = 5}
+            },
+            events = {
+                mouseClick = c(function()
+                    local idx = 1
+                    for i, name in ipairs(CATEGORY_COLOR_ORDER) do
+                        if name == current then idx = i break end
+                    end
+                    cc[key] = CATEGORY_COLOR_ORDER[(idx % #CATEGORY_COLOR_ORDER) + 1]
+                    saveAppearanceSettings()
+                    I.TwentyTwentyObjects.refreshUI()
+                end),
+                mouseEnter = c(function(e)
+                    e.target.props.textColor = col(0.9, 0.95, 1)
+                    e.target:update()
+                end),
+                mouseLeave = c(function(e)
+                    e.target.props.textColor = CLICKABLE_TEXT_COLOR
+                    e.target:update()
+                end)
+            }
+        }
+    end
+
     return {
         type = ui.TYPE.Flex,
         props = {
@@ -1128,7 +1169,18 @@ createAppearanceSettings = function()
                 appearanceSettings.glowOpacity = v
                 saveAppearanceSettings()
             end, 10),
-            
+
+            vspace(10),
+            { type = ui.TYPE.Text, props = { text = "Per-type glow colors ('default' follows Glow color)", textSize = 15, textColor = HEADER_TEXT_COLOR } },
+            vspace(4),
+            categoryColorRow("Items", "items"),
+            categoryColorRow("Containers", "containers"),
+            categoryColorRow("Doors", "doors"),
+            categoryColorRow("Activators", "activators"),
+            categoryColorRow("NPCs", "npcs"),
+            categoryColorRow("Creatures", "creatures"),
+            categoryColorRow("Dead bodies", "deadBodies"),
+
             vspace(14),
             { type = ui.TYPE.Text, props = { text = "Text", textSize = 17, textColor = HEADER_TEXT_COLOR } },
             sectionRule(320),
@@ -1896,7 +1948,8 @@ local function refresh(data) -- This is the ACTUAL refresh for the full UI
         glowColor = "cyan",
         glowSize = 100,
         glowOpacity = 80,
-        labelTextSize = 100
+        labelTextSize = 100,
+        categoryColors = {}
     }
     performanceSettings= data.performance or {
         maxLabels = 100,

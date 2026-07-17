@@ -211,6 +211,34 @@ local function scanAndCreateLabels(profile)
         sizeFactor = (appearanceNow.glowSize or 100) / 100,
         opacity = (appearanceNow.glowOpacity or 80) / 100,
     }
+    -- Per-type glow colors: a category's preset overrides the global color;
+    -- 'default'/absent/unknown presets fall back to glowStyle unchanged.
+    -- Type-guarded: persisted categoryColors may be missing or malformed.
+    local categoryColors = appearanceNow.categoryColors
+    if type(categoryColors) ~= 'table' then categoryColors = {} end
+    local function glowStyleFor(object)
+        local t = object.type
+        local cat
+        if t == types.NPC or t == types.Creature then
+            if isDeadActor(object) then
+                cat = 'deadBodies'
+            else
+                cat = (t == types.NPC) and 'npcs' or 'creatures'
+            end
+        elseif t == types.Container then
+            cat = 'containers'
+        elseif t == types.Door then
+            cat = 'doors'
+        elseif t == types.Activator or t == types.Static then
+            cat = 'activators'
+        else
+            cat = 'items'
+        end
+        local preset = categoryColors[cat]
+        local color = (type(preset) == 'string') and labelRenderer.GLOW_COLORS[preset] or nil
+        if not color then return glowStyle end
+        return { color = color, sizeFactor = glowStyle.sizeFactor, opacity = glowStyle.opacity }
+    end
     
     -- Clear existing
     clearAllLabels()
@@ -334,14 +362,15 @@ local function scanAndCreateLabels(profile)
             else
                 local center, size, worldDiag = projection.getOutlineBox(candidate.object)
                 if center and size then
+                    local style = glowStyleFor(candidate.object)
                     local ok, box = pcall(labelRenderer.createOutlineBox, {
                         position = center,
                         size = size,
                         worldDiag = worldDiag,
                         alpha = 1.0,
-                        color = glowStyle.color,
-                        sizeFactor = glowStyle.sizeFactor,
-                        opacity = glowStyle.opacity,
+                        color = style.color,
+                        sizeFactor = style.sizeFactor,
+                        opacity = style.opacity,
                     })
                     if ok and box then
                         table.insert(activeLabels, {
@@ -350,7 +379,7 @@ local function scanAndCreateLabels(profile)
                             name = name,
                             label = box,
                             isOutline = true,
-                            glowStyle = glowStyle,
+                            glowStyle = style,
                             line = nil,
                             alpha = 1.0,
                             targetAlpha = 1,
@@ -389,7 +418,8 @@ local function scanAndCreateLabels(profile)
             if name and name ~= "" then
                 local center, size, worldDiag = projection.getOutlineBox(candidate.object)
                 if center and size then
-                    local glowD = labelRenderer.computeGlowDiameter(worldDiag, size, glowStyle.sizeFactor)
+                    local style = glowStyleFor(candidate.object)
+                    local glowD = labelRenderer.computeGlowDiameter(worldDiag, size, style.sizeFactor)
                     local labelPos = util.vector2(center.x, center.y - glowD / 2 - 14)
                     local label = labelRenderer.createNativeLabel(name, {
                         position = labelPos,
@@ -407,7 +437,7 @@ local function scanAndCreateLabels(profile)
                             -- recomputes the anchor from the glow radius, so
                             -- it MUST use the same sizeFactor as the scan-time
                             -- placement or the label snaps between two heights.
-                            glowStyle = glowStyle,
+                            glowStyle = style,
                             line = nil,
                             alpha = 1.0,
                             targetAlpha = 1,
