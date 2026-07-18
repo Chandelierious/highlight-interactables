@@ -56,6 +56,20 @@ running both will double-register hotkeys and settings.
 - Skip empty-named objects in glow mode (invisible ambient light emitters
   otherwise get phantom highlights).
 
+**Round two** (the "some obvious bugs" got fixed)
+- Markers now track objects every rendered frame — no more lag or judder
+  when you pan. Glows also center on the object properly instead of
+  drifting off toward a corner.
+- Killed the phantom orbs that mirrored onto the wrong side of the screen
+  from objects behind you.
+- Looking down at floor loot no longer makes highlights vanish.
+- The dead-bodies filter actually works now (turns out the engine only
+  lets global scripts scan cells — it had been failing silently forever).
+- Per-type glow colors: give items, containers, doors, activators, NPCs,
+  creatures, and dead bodies each their own color in Appearance settings.
+  "default" follows the main glow color. Crates gold, corpses red, etc.
+- Way less log spam.
+
 **Known limitations**
 - Glow is a screen-space effect, not a mesh silhouette (no per-object outline
   shader in OpenMW's Lua API).
