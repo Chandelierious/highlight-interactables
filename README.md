@@ -55,8 +55,6 @@ running both will double-register hotkeys and settings.
   serializers (hotkey listener and global script).
 - Skip empty-named objects in glow mode (invisible ambient light emitters
   otherwise get phantom highlights).
-
-**Round two** (the "some obvious bugs" got fixed)
 - Markers now track objects every rendered frame — no more lag or judder
   when you pan. Glows also center on the object properly instead of
   drifting off toward a corner.
